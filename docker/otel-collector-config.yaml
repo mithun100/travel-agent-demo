@@ -1,0 +1,69 @@
+# otel-collector-config.yaml — OpenTelemetry Collector configuration
+# Receives OTLP traces/metrics/logs from the travel-planner app and
+# forwards them to Splunk Observability Cloud and Splunk Platform (HEC).
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 5s
+    send_batch_size: 1000
+
+  resourcedetection:
+    detectors: [env, system]
+    timeout: 10s
+    override: false
+
+exporters:
+  # Splunk Observability Cloud — metrics only
+  signalfx:
+    access_token: ${env:SPLUNK_ACCESS_TOKEN}
+    realm: ${env:SPLUNK_REALM}
+    send_otlp_histograms: true
+
+  # Splunk APM — traces (required for Service Map)
+  sapm:
+    access_token: ${env:SPLUNK_ACCESS_TOKEN}
+    endpoint: https://ingest.${env:SPLUNK_REALM}.signalfx.com/v2/trace
+
+  # Splunk Platform — logs via HEC
+  splunk_hec/logs:
+    token: ${env:SPLUNK_HEC_TOKEN}
+    endpoint: ${env:SPLUNK_HEC_ENDPOINT}
+    index: ${env:SPLUNK_HEC_INDEX}
+    source: travel-planner
+    sourcetype: otel
+    tls:
+      insecure_skip_verify: false
+
+  # Debug — uncomment to print telemetry to collector stdout
+  # debug:
+  #   verbosity: detailed
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch, resourcedetection]
+      exporters: [sapm]
+
+    metrics:
+      receivers: [otlp]
+      processors: [batch, resourcedetection]
+      exporters: [signalfx]
+
+    logs:
+      receivers: [otlp]
+      processors: [batch, resourcedetection]
+      exporters: [splunk_hec/logs]

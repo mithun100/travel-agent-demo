@@ -1,0 +1,109 @@
+# docker-compose.yml — Deploy travel-agent-demo on a Docker VM
+# LLM Backend is selected by LLM_BACKEND in .env (nim | bedrock | azure):
+#   nim     — NVIDIA NIM   (NGC_API_KEY + NVIDIA_NIM_BASE_URL + NVIDIA_NIM_MODEL)
+#   bedrock — AWS Bedrock  (AWS_BEDROCK_MODEL_ID + AWS credentials)
+#   azure   — Azure OpenAI (AZURE_OPENAI_* vars)
+#
+# Usage:
+#   ./docker-deploy.sh          → build & start all services
+#   ./docker-deploy.sh down     → stop everything
+#   ./docker-deploy.sh logs     → tail all logs
+#
+# Prerequisites: .env file at the repo root (one level up from this folder)
+
+services:
+
+  # ── Splunk OpenTelemetry Collector ──────────────────────────────────────────
+  otel-collector:
+    image: ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib:0.120.0
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro  # file lives alongside docker-compose.yml in docker/
+    environment:
+      SPLUNK_ACCESS_TOKEN: ${SPLUNK_ACCESS_TOKEN}
+      SPLUNK_REALM: ${SPLUNK_REALM}
+      SPLUNK_HEC_TOKEN: ${SPLUNK_HEC_TOKEN}
+      SPLUNK_HEC_ENDPOINT: ${SPLUNK_HEC_ENDPOINT}
+      SPLUNK_HEC_INDEX: ${SPLUNK_HEC_INDEX}
+      LAB_USER_ID: ${LAB_USER_ID}
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/otelcol-contrib", "--version"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ── Travel Planner App ───────────────────────────────────────────────────────
+  travel-planner:
+    build: ../app
+    ports:
+      - "8080:8080"
+    depends_on:
+      otel-collector:
+        condition: service_healthy
+    environment:
+      # ── LLM Backend: AWS Bedrock (takes priority when AWS_BEDROCK_MODEL_ID is set) ──
+      AWS_BEDROCK_MODEL_ID: ${AWS_BEDROCK_MODEL_ID:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+
+      # ── LLM Backend: Azure OpenAI (used when Bedrock vars are absent) ─────
+      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
+      AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
+      AZURE_OPENAI_DEPLOYMENT_NAME: ${AZURE_OPENAI_DEPLOYMENT_NAME:-}
+      AZURE_OPENAI_API_VERSION: ${AZURE_OPENAI_API_VERSION:-}
+
+      # ── Backend selector (nim | bedrock | azure) ────────────────────────
+      LLM_BACKEND: ${LLM_BACKEND:-nim}
+
+      # ── LLM Backend: NVIDIA NIM ───────────────────────────────────────────
+      OPENAI_API_KEY: ${NGC_API_KEY:-}
+      OPENAI_BASE_URL: ${NVIDIA_NIM_BASE_URL:-}
+      OPENAI_MODEL: ${NVIDIA_NIM_MODEL:-}
+
+      # ── OpenTelemetry ─────────────────────────────────────────────────────
+      OTEL_SERVICE_NAME: travel-planner-${LAB_USER_ID}
+      OTEL_RESOURCE_ATTRIBUTES: deployment.environment=travel-planner-demo,lab.user.id=${LAB_USER_ID},service.instance.id=${LAB_USER_ID}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE: DELTA
+      OTEL_LOGS_EXPORTER: otlp
+      OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED: "true"
+      OTEL_PYTHON_EXCLUDED_URLS: "^(https?://)?[^/]+(/health)?$$"
+      OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT: "true"
+      OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT_MODE: SPAN_AND_EVENT
+      OTEL_INSTRUMENTATION_GENAI_EVALS_RESULTS_AGGREGATION: "true"
+      OTEL_INSTRUMENTATION_GENAI_EMITTERS: span_metric_event,splunk
+      OTEL_INSTRUMENTATION_GENAI_EMITTERS_EVALUATION: replace-category:SplunkEvaluationResults
+      OTEL_GENAI_EVAL_DEBUG_SKIPS: "true"
+      OTEL_GENAI_EVAL_DEBUG_EACH: "false"
+      OTEL_INSTRUMENTATION_GENAI_DEBUG: "false"
+      SPLUNK_PROFILER_ENABLED: "true"
+      HOME: /tmp
+
+      # ── DeepEval (uses Azure OpenAI as the eval judge LLM) ───────────────
+      DEEPEVAL_LLM_BASE_URL: ${DEEPEVAL_LLM_BASE_URL}
+      DEEPEVAL_LLM_MODEL: ${DEEPEVAL_LLM_MODEL}
+      DEEPEVAL_LLM_PROVIDER: ${DEEPEVAL_LLM_PROVIDER}
+      DEEPEVAL_LLM_API_KEY: ${DEEPEVAL_LLM_API_KEY}
+      DEEPEVAL_LLM_EXTRA_HEADERS: ${DEEPEVAL_LLM_EXTRA_HEADERS}
+      DEEPEVAL_PER_ATTEMPT_TIMEOUT_SECONDS_OVERRIDE: "300"
+      DEEPEVAL_RETRY_MAX_ATTEMPTS: "1"
+      DEEPEVAL_FILE_SYSTEM: READ_ONLY
+      # ── Evaluation tuning: sentiment on agent spans, concurrent ──
+      #OTEL_INSTRUMENTATION_GENAI_EVALS_EVALUATORS: "Deepeval(AgentInvocation(sentiment))"
+      OTEL_INSTRUMENTATION_GENAI_EVALS_CONCURRENT: "true"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 15s
+      retries: 3
+
+  # loadgen removed — attendees are the only source of traffic.
+  # This keeps traces clean: every span in Splunk belongs to the attendee,
+  # no filtering needed. Poison in Act 3 is the sole anomaly.

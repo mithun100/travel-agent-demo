@@ -1,0 +1,41 @@
+# nim-ec2/docker-compose.yml — INSTRUCTOR SETUP ONLY
+# Matches the live setup at /home/ubuntu/nim-monitoring/ on the NIM EC2.
+# Runs on the NIM EC2 instance — NOT on lab attendee VMs.
+#
+# Prerequisites:
+#   1. NIM container already running on this host at port 8000
+#   2. NVIDIA Docker runtime installed (for dcgm-exporter)
+#   3. Copy .env.example → .env and fill in SPLUNK_ACCESS_TOKEN + SPLUNK_REALM
+#
+# Usage:
+#   docker compose up -d
+#   docker compose restart otel-collector   # after updating .env
+
+version: '3'
+services:
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    network_mode: host
+    restart: unless-stopped
+
+  otel-collector:
+    image: quay.io/signalfx/splunk-otel-collector:latest
+    network_mode: host
+    volumes:
+      - ./otel-config.yml:/etc/otel/config.yaml
+    environment:
+      - SPLUNK_ACCESS_TOKEN=${SPLUNK_ACCESS_TOKEN}
+      - SPLUNK_REALM=${SPLUNK_REALM}
+    command: ["--config", "/etc/otel/config.yaml"]
+    restart: unless-stopped
+
+  dcgm-exporter:
+    image: nvcr.io/nvidia/k8s/dcgm-exporter:3.3.5-3.4.0-ubuntu22.04
+    runtime: nvidia
+    network_mode: host
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+    restart: unless-stopped

@@ -1,0 +1,57 @@
+# nim-ec2/otel-config.yml
+# Matches the live setup at /home/ubuntu/nim-monitoring/otel-config.yml on the NIM EC2.
+# Fix applied vs original: access_token/realm use env vars, deployment.environment
+# changed from nim-ec2 → travel-planner-demo for APM correlation.
+
+extensions:
+  health_check: {}
+
+receivers:
+  prometheus/nim:
+    config:
+      scrape_configs:
+        - job_name: nvidia-nim-vllm
+          scrape_interval: 10s
+          metrics_path: /metrics
+          static_configs:
+            - targets: ['localhost:8000']
+
+  prometheus/dcgm:
+    config:
+      scrape_configs:
+        - job_name: nvidia-dcgm-gpu
+          scrape_interval: 15s
+          static_configs:
+            - targets: ['localhost:9400']
+
+processors:
+  batch: {}
+  resourcedetection:
+    detectors: [ec2, system]
+  resource:
+    attributes:
+      - key: deployment.environment
+        value: travel-planner-demo
+        action: upsert
+      - key: service.name
+        value: nvidia-nim-llama3
+        action: upsert
+  filter/drop_oversized:
+    metrics:
+      exclude:
+        match_type: strict
+        metric_names:
+          - "vllm:cache_config_info"
+
+exporters:
+  signalfx:
+    access_token: ${env:SPLUNK_ACCESS_TOKEN}
+    realm: ${env:SPLUNK_REALM}
+
+service:
+  extensions: [health_check]
+  pipelines:
+    metrics:
+      receivers: [prometheus/nim, prometheus/dcgm]
+      processors: [filter/drop_oversized, batch, resourcedetection, resource]
+      exporters: [signalfx]
